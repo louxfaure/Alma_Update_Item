@@ -8,9 +8,10 @@ import csv
 import json
 import sys
 import requests
+import time
 import xml.etree.ElementTree as ET
 from chardet import detect
-import threading
+import multiprocessing
 
 #Modules maison
 from Abes_Apis_Interface.AbesXml import AbesXml
@@ -18,7 +19,8 @@ from Alma_Apis_Interface import Alma_Apis_Records
 from Alma_Apis_Interface import Alma_Apis
 from logs import logs
 
-SERVICE = "Modif_exemplaires"
+
+SERVICE = "test_threading"
 
 LOGS_LEVEL = 'INFO'
 LOGS_DIR = os.getenv('LOGS_PATH')
@@ -26,42 +28,14 @@ LOGS_DIR = os.getenv('LOGS_PATH')
 
 REGION = 'EU'
 INSTITUTION = 'ub'
-API_KEY = os.getenv('PROD_UB_BIB_API')
+API_KEY = os.getenv('TEST_UB_API')
 
-FILE_NAME = 'revue_praticien'
+FILE_NAME = 'test_threading'
 IN_FILE = '/media/sf_Partage_LouxBox/{}.csv'.format(FILE_NAME)
 OUT_FILE = '/media/sf_Partage_LouxBox/{}_Rapport.csv'.format(FILE_NAME)
 ITEM_XSD = 'https://developers.exlibrisgroup.com/wp-content/uploads/alma/xsd/rest_item.xsd'
 
 xsd = {'xs': 'http://www.w3.org/2001/XMLSchema'}
-
-# ERROR_FILE = '/media/sf_Partage_LouxBox/{}_Erreurs.csv'.format(FILE_NAME)
-
-class UpdateItem(threading.Thread):
-
-    def __init__(self, BARCODE, HEADERS, REPORT):
-        threading.Thread.__init__(self)
-        barcode = BARCODE
-        self.HEADERS = HEADERS
-        report = REPORT
-
-    def run(self):
-        status,item = alma_api.get_item_with_barcode(barcode, accept='json')
-        if status == "Error" :
-            report.write("{}\t{}\t{}\n".format(barcode,status,item))
-            return 0
-        i = 1
-        bib_id = item["bib_data"]["mms_id"]
-        holding_id = item["holding_data"]["holding_id"]
-        item_id = item["item_data"]["pid"]
-        for field in self.HEADERS:
-            item["item_data"][field] = row[i]
-            i += 1
-        status,reponse = alma_api.set_item(bib_id, holding_id, item_id, json.dumps(item), content_type='json', accept='json')
-        if status == "Error" :
-            report.write("{}\t{}\t{}\n").format(barcode,status,reponse)
-        else :
-            report.write("{}\tSuccès\tItem mis à jour\n".format(barcode,status,reponse))
 
 # get file encoding type
 def get_encoding_type(file):
@@ -98,49 +72,79 @@ log_module = logging.getLogger(SERVICE)
 
 alma_api = Alma_Apis_Records.AlmaRecords(apikey=API_KEY, region=REGION, service=SERVICE)
 
-report = open(OUT_FILE, "w",  encoding='utf-8')
-report.write("Code-barres\tStatut\tMessage\n")
+
+def init(queue):
+    global idx
+    idx = queue.get()
+
+def thread(x):
+    global idx
+    headers = x[0]
+    barcode = x[1]
+    process = multiprocessing.current_process()
+    status,item = alma_api.get_item_with_barcode(barcode, accept='json')
+    # log_module.info("{}:{}:{}:{}:{}".format(x[1],x[2],x[3],x[4],x[5]))
+    if status == "Error" :
+        log_module.error("{}:{}:{}:{}".format(idx,process.pid,barcode,item))
+        return barcode,"Erreur",item
+    else :
+        # log_module.info("{}:{}:{}:{}".format(idx,process.pid,barcode,item["item_data"]["barcode"]))
+        i = 2
+        bib_id = item["bib_data"]["mms_id"]
+        holding_id = item["holding_data"]["holding_id"]
+        item_id = item["item_data"]["pid"]
+        for field in headers:
+            item["item_data"][field] = x[i]
+            i += 1
+        status,reponse = alma_api.set_item(bib_id, holding_id, item_id, json.dumps(item), content_type='json', accept='json')
+        if status == "Error" :
+            log_module.error("{}:{}:{}".format(os.getpid(),barcode,reponse))
+            return barcode,"Erreur",reponse
+        else :
+            log_module.info("{}:{}:{}:{}".format(os.getpid(),barcode,item["item_data"]["barcode"],reponse["item_data"]["barcode"]))
+            return barcode, "Succés", "Exemplaire mis à jour"
 
 
+        
 ###Update item sequence
 # ###################### 
+start_time = time.time()
 from_codec = get_encoding_type(IN_FILE)
+
+# Traiteemnt des données en entrée
 with open(IN_FILE, 'r', encoding=from_codec, newline='') as f:
     reader = csv.reader(f, delimiter='\t')
+    # On s'assure que les noms de colonne sont bons est que les champs proposés sont bien éditable via API
     headers = next(reader)
     del headers[0]
+    rows=[]
     code_erreur, message = test_headers(headers)
     if code_erreur == 0 :
         log_module.error(message)
         sys.exit()
     log_module.info(message)
-    # We read the file
+    num = 0
+    # On stocke les données
     for row in reader:
         if len(row) < 2:
             continue
-        barcode = row[0]
-        # print(barcode)
-        traitement = UpdateItem(barcode,headers,report)
-        status,item = alma_api.get_item_with_barcode(barcode, accept='json')
-        if status == "Error" :
-            report.write("{}\t{}\t{}\n".format(barcode,status,item))
-            continue
-        i = 1
-        bib_id = item["bib_data"]["mms_id"]
-        holding_id = item["holding_data"]["holding_id"]
-        item_id = item["item_data"]["pid"]
-        for field in headers:
-            item["item_data"][field] = row[i]
-            i += 1
-        # item["item_data"]["linking_number"] = 0 # Dans certians cas le N° de lien n'est plus référencé
-        status,reponse = alma_api.set_item(bib_id, holding_id, item_id, json.dumps(item), content_type='json', accept='json')
-        if status == "Error" :
-            report.write("{}\t{}\t{}\n".format(barcode,status,reponse))
-        else :
-            report.write("{}\tSuccès\tItem mis à jour\n".format(barcode,status,reponse))
-        log_module.info(barcode)
-report.close
+        row.insert(0, headers)
+        rows.append(row)
 
-log_module.info("FIN DU TRAITEMENT")
+# Prépartion et exécution des processus multimples
+if __name__ == '__main__':
+    ids = [0, 1, 2, 3,4,5]
+    manager = multiprocessing.Manager()
+    idQueue = manager.Queue()
+    for i in ids:
+        idQueue.put(i)
+    p = multiprocessing.Pool(8, init, (idQueue,))
+    with open(OUT_FILE, "w",  encoding='utf-8') as f:
+        f.write("Code-barres\tStatut\tMessage\n")
+        for result in p.imap(thread, rows):
+            f.write("{}\t{}\t{}\n".format(*result))
+    log_module.info("FIN DU TRAITEMENT :: {}".format(time.time() - start_time))
 
-                    
+
+
+
